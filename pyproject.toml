@@ -1,0 +1,42 @@
+[project]
+name = "mypaper2code"
+version = "0.1.0"
+description = "Local assistant for understanding AI research papers and generating traceable implementation workspaces."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "MyPaper2Code contributors" }]
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.7",
+    "pymupdf>=1.24",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "tantivy>=0.26",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=3.0"]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+mypaper2code = "mypaper2code.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
