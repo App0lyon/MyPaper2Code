@@ -51,8 +51,8 @@ class WorkspaceMetadata(BaseModel):
     workspace_id: str
     paper: PaperMetadata
     root: str
-    provider: str = "stub"
-    model: str = "stub"
+    provider: str = "nvidia"
+    model: str = "mistralai/mistral-medium-3.5-128b"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -66,8 +66,8 @@ class ImplementationRequirements(BaseModel):
     include_tests: bool = True
     include_training_script: bool = True
     include_evaluation_script: bool = True
-    provider: str = "stub"
-    model: str = "stub"
+    provider: str = "nvidia"
+    model: str = "mistralai/mistral-medium-3.5-128b"
 
 
 class PaperUnderstanding(BaseModel):

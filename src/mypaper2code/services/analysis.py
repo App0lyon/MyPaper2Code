@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from mypaper2code.core.io import read_json, write_json
 from mypaper2code.core.models import PaperChunk, PaperUnderstanding, SourceSpan
 from mypaper2code.core.text import excerpt
+from mypaper2code.providers.base import (
+    NVIDIA_DEFAULT_MODEL,
+    OLLAMA_DEFAULT_MODEL,
+    ProviderError,
+    provider_for,
+)
+from mypaper2code.services.config import load_config
+from mypaper2code.services.requirements import load_requirements
 from mypaper2code.services.search.hybrid import HybridRetriever
+from mypaper2code.services.workspace import WorkspaceManager
 
 ANALYSIS_QUERIES = {
     "Architecture": "model architecture proposed method modules network",
@@ -60,40 +70,114 @@ class MethodAnalyzer:
 def build_understanding(workspace: Path) -> PaperUnderstanding:
     retriever = HybridRetriever(workspace)
     hits = retriever.search("method architecture loss training dataset evaluation metric", limit=8)
-    corpus = " ".join(hit.text.lower() for hit in hits)
-    architecture = _detect_architecture(corpus)
-    loss = _detect_loss(corpus)
-    datasets = _detect_any(
-        corpus,
-        ["cifar-10", "cifar10", "imagenet", "mnist", "coco", "wikitext"],
-    )
-    metrics = _detect_any(corpus, ["accuracy", "f1", "auc", "precision", "recall", "bleu", "rouge"])
-    training = _detect_any(
-        corpus,
-        ["adamw", "adam", "sgd", "cosine", "scheduler", "batch", "epoch"],
+    return _llm_understanding(workspace, hits)
+
+
+def _llm_understanding(workspace: Path, hits) -> PaperUnderstanding:
+    metadata = WorkspaceManager.load_metadata(workspace)
+    config = load_config()
+    requirements = load_requirements(workspace)
+    provider_name = _first_provider(
+        requirements.provider,
+        metadata.provider,
+        config["provider"],
     )
     sources = [
         SourceSpan(section=hit.section, page=hit.page, text=hit.text, chunk_id=hit.chunk_id)
         for hit in hits
     ]
-    ambiguities: list[str] = []
-    if architecture == "unspecified":
-        ambiguities.append("Architecture not found explicitly in retrieved passages.")
-    if loss == "unspecified":
-        ambiguities.append("Loss function not found explicitly in retrieved passages.")
-    if not datasets:
-        ambiguities.append("Dataset names not found explicitly in retrieved passages.")
-    if not metrics:
-        ambiguities.append("Evaluation metrics not found explicitly in retrieved passages.")
-    return PaperUnderstanding(
-        architecture=architecture,
-        loss=loss,
-        datasets=datasets,
-        metrics=metrics,
-        training=training,
-        ambiguities=ambiguities,
-        sources=sources,
+    source_text = "\n\n".join(
+        f"[{idx}] page={source.page} section={source.section}\n{source.text}"
+        for idx, source in enumerate(sources, start=1)
     )
+    prompt = f"""Extract implementation-relevant facts from these paper passages.
+Return strict JSON with exactly these keys:
+architecture: string
+loss: string
+datasets: array of strings
+metrics: array of strings
+training: array of strings
+ambiguities: array of strings
+
+Passages:
+{source_text}
+"""
+    errors: list[str] = []
+    for candidate in _provider_order(provider_name):
+        model = _model_for_provider(candidate, requirements.model, metadata.model, config["model"])
+        provider = provider_for(
+            candidate,
+            model,
+            ollama_base_url=config["ollama_base_url"],
+            nvidia_base_url=config["nvidia_base_url"],
+            nvidia_api_key_env=config["nvidia_api_key_env"],
+        )
+        try:
+            raw = provider.complete(
+                prompt,
+                system="You extract paper implementation details and return only valid JSON.",
+            )
+            data = _load_json_object(raw)
+            return PaperUnderstanding(
+                architecture=str(data.get("architecture") or "unspecified"),
+                loss=str(data.get("loss") or "unspecified"),
+                datasets=[str(item) for item in data.get("datasets", [])],
+                metrics=[str(item) for item in data.get("metrics", [])],
+                training=[str(item) for item in data.get("training", [])],
+                ambiguities=[str(item) for item in data.get("ambiguities", [])],
+                sources=sources,
+            )
+        except (ProviderError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            errors.append(f"{candidate}: {exc}")
+            continue
+    raise ProviderError(
+        "No LLM provider is available for paper analysis. Tried "
+        f"{', '.join(_provider_order(provider_name))}. Errors: {'; '.join(errors)}"
+    )
+
+
+def _first_provider(*values: str) -> str:
+    for value in values:
+        normalized = value.lower()
+        if normalized in {"nvidia", "ollama"}:
+            return normalized
+    return "nvidia"
+
+
+def _provider_order(provider_name: str) -> list[str]:
+    if provider_name == "nvidia":
+        return ["nvidia", "ollama"]
+    if provider_name == "ollama":
+        return ["ollama"]
+    raise ProviderError(f"Unsupported provider `{provider_name}`. Use `nvidia` or `ollama`.")
+
+
+def _model_for_provider(provider_name: str, *values: str) -> str:
+    for value in values:
+        if not value or value == "stub":
+            continue
+        if provider_name == "ollama" and value == NVIDIA_DEFAULT_MODEL:
+            continue
+        if provider_name == "nvidia" and value == OLLAMA_DEFAULT_MODEL:
+            continue
+        return value
+    return OLLAMA_DEFAULT_MODEL if provider_name == "ollama" else NVIDIA_DEFAULT_MODEL
+
+
+def _load_json_object(raw: str) -> dict:
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:].strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in provider response.")
+    parsed = json.loads(stripped[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise TypeError("Provider response must be a JSON object.")
+    return parsed
 
 
 def sources_for_plan(workspace: Path) -> list[SourceSpan]:

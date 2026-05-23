@@ -1,240 +1,299 @@
 # MyPaper2Code
 
-**MyPaper2Code** est un assistant local de compréhension et de reproduction d'articles scientifiques en intelligence artificielle.
+MyPaper2Code is a local CLI assistant for understanding AI research papers and
+building a traceable first implementation workspace.
 
-L'objectif du projet est d'aider un utilisateur à passer d'un papier de recherche à une implémentation structurée, explicable et partiellement vérifiable, tout en conservant une traçabilité claire entre les décisions de génération de code, les contraintes utilisateur et le contenu du papier.
-
-Le projet ne vise pas à transformer automatiquement n'importe quel article en une reproduction parfaite. Il cherche plutôt à fournir un environnement assisté permettant de comprendre un papier, d'interroger son contenu, de construire un plan d'implémentation, d'imposer des contraintes techniques, puis de générer progressivement une base de code cohérente dans un workspace dédié.
-
-## Objectif
-
-La reproduction d'un article scientifique est souvent complexe : les papiers omettent certains détails d'implémentation, les hyperparamètres ne sont pas toujours complets, les architectures sont parfois décrites de manière ambiguë et les choix expérimentaux peuvent être dispersés entre le corps principal, les tableaux, les figures et les annexes.
-
-**MyPaper2Code** a pour objectif de réduire cette friction en proposant un pipeline complet :
-
-1. ingestion d'un article scientifique ;
-2. extraction et structuration de ses sections importantes ;
-3. indexation du contenu pour permettre des questions/réponses sourcées ;
-4. analyse de la méthode proposée ;
-5. génération d'un plan d'implémentation ;
-6. prise en compte de contraintes utilisateur ;
-7. création d'un workspace dédié ;
-8. génération progressive d'un squelette de projet ;
-9. validation minimale du code généré ;
-10. production d'un rapport d'hypothèses et de fidélité au papier.
-
-L'idée centrale est de fournir un assistant capable d'accompagner l'utilisateur dans la reproduction d'un papier, tout en signalant clairement les zones d'incertitude ou les choix arbitraires nécessaires.
-
-## Cas d'usage
-
-Un utilisateur peut fournir un article sous forme de PDF ou de lien arXiv, puis interagir avec le système pour :
-
-- poser des questions sur la méthode ;
-- retrouver la fonction de perte utilisée ;
-- identifier les datasets et métriques d'évaluation ;
-- comprendre l'architecture du modèle ;
-- extraire les hyperparamètres disponibles ;
-- demander un plan d'implémentation ;
-- imposer un framework ou une structure de projet ;
-- choisir le modèle LLM utilisé pour l'analyse et la génération ;
-- générer un squelette de code PyTorch ;
-- créer un workspace isolé pour l'implémentation ;
-- obtenir un rapport sur les hypothèses prises par l'agent.
-
-Exemples de requêtes utilisateur :
+The project is intentionally not a one-shot "paper to perfect code" generator.
+It follows an interactive workflow:
 
 ```text
-Quelle est l'architecture du modèle proposé ?
-
-Quels sont les datasets utilisés dans les expériences ?
-
-Génère un plan d'implémentation en PyTorch.
-
-Implémente une version minimale compatible avec CIFAR-10.
-
-Utilise une configuration YAML et sépare le code en modules data, model, training et evaluation.
-
-Utilise le modèle local llama3 avec Ollama.
-
-Utilise un modèle NVIDIA Build pour la génération de code.
-
-Quelles parties du papier ne sont pas assez précises pour une reproduction fidèle ?
+ingest paper
+-> ask questions about the paper
+-> set implementation requirements
+-> analyze the method
+-> create a paper-specific implementation plan
+-> implement that plan step by step
+-> validate and report assumptions
+-> ask questions about the generated implementation
 ```
 
-## Fonctionnalités principales
+The current MVP is implemented as a Python package managed by `uv`. It uses
+file-based workspaces, JSON/YAML artifacts, Tantivy lexical search, local vector
+search, and Reciprocal Rank Fusion (RRF).
 
-### 1. Ingestion de papier
+## Current Capabilities
 
-Le système permet d'importer un papier scientifique à partir d'un fichier PDF ou d'une URL.
+- Ingest a PDF paper with PyMuPDF.
+- Extract text sections and chunks.
+- Index paper chunks with:
+  - Tantivy full-text search;
+  - NumPy exact vector search;
+  - RRF fusion over lexical and vector rankings.
+- Ask sourced questions about the paper with page, section, passage, and score.
+- Persist user requirements in the workspace.
+- Analyze the paper into a structured method understanding.
+- Generate a paper-specific implementation plan as Markdown and JSON.
+- Implement the plan step by step into `generated_code/`.
+- Write an implementation trace linking paper evidence, plan steps, files, and symbols.
+- Validate generated code with import checks, Ruff when available, and pytest.
+- Ask questions about the generated code by using the trace plus direct file search.
+- Produce a fidelity and assumptions report.
 
-L'étape d'ingestion extrait le texte et tente de structurer le document en sections logiques :
+## What This MVP Does Not Do Yet
 
-- abstract ;
-- introduction ;
-- related work ;
-- method ;
-- experiments ;
-- results ;
-- appendix ;
-- références ;
-- tableaux et légendes de figures lorsque disponibles.
+- It does not provide a FastAPI API or web UI.
+- It does not perform faithful full reproduction of arbitrary papers.
+- It does not index generated code with RAG. Code questions use trace metadata and
+  direct file inspection instead.
+- NVIDIA and Ollama providers are available for LLM-backed paper understanding.
+- NVIDIA is the default provider. If NVIDIA is unavailable, analysis falls back
+  to Ollama. If Ollama is also unavailable, analysis fails instead of silently
+  using a local heuristic.
+- The implementation logic is plan-driven and paper-aware. `analyze` asks the
+  selected provider for structured JSON understanding before planning.
 
-Cette structuration permet ensuite au système de différencier les informations générales des informations réellement utiles à l'implémentation.
+## Installation
 
-### 2. Recherche et questions/réponses sourcées
+```bash
+uv sync --all-extras
+```
 
-Une fois le papier indexé, l'utilisateur peut poser des questions en langage naturel.
+Useful checks:
 
-Le système s'appuie sur un mécanisme de retrieval-augmented generation afin de répondre en citant les passages pertinents du papier.
+```bash
+uv run mypaper2code --help
+uv run pytest
+uv run ruff check .
+```
 
-L'objectif est d'éviter les réponses non vérifiables. Chaque réponse doit idéalement être accompagnée de références vers :
+## One-Command Workflow
 
-- la section du papier ;
-- la page ;
-- le passage utilisé ;
-- éventuellement une figure ou un tableau.
+The simplest entrypoint is `run`. It can start from a PDF or continue an
+existing workspace.
 
-Cette étape transforme le papier en base de connaissances exploitable pour l'utilisateur et pour les agents de génération de code.
+From a PDF:
 
-### 3. Analyse de la méthode
+```bash
+uv run mypaper2code run paper.pdf \
+  --provider nvidia \
+  --dataset cifar10 \
+  --ask-paper "What loss function is used?" \
+  --ask-code "Where is the loss implemented?"
+```
 
-Le système tente d'identifier les composants nécessaires à l'implémentation :
+From an existing workspace:
 
-- architecture du modèle ;
-- modules principaux ;
-- fonction de perte ;
-- stratégie d'entraînement ;
-- datasets utilisés ;
-- métriques d'évaluation ;
-- hyperparamètres ;
-- prétraitements ;
-- détails d'optimisation ;
-- protocole expérimental.
+```bash
+uv run mypaper2code run \
+  --workspace workspaces/my_paper_20260523-120000 \
+  --dataset cifar10
+```
 
-Lorsque certaines informations sont absentes ou ambiguës, elles sont marquées comme incertaines.
-
-Le système ne doit pas masquer ces incertitudes : elles sont conservées pour être affichées dans le rapport final.
-
-### 4. Plan d'implémentation
-
-À partir de l'analyse du papier, MyPaper2Code génère un plan d'implémentation structuré.
-
-Ce plan peut inclure :
+By default, `run` performs:
 
 ```text
-project/
-├── configs/
-│   └── default.yaml
-├── src/
-│   ├── data/
-│   ├── models/
-│   ├── losses/
-│   ├── training/
-│   ├── evaluation/
-│   └── utils/
-├── tests/
-├── scripts/
-│   ├── train.py
-│   └── evaluate.py
-├── README.md
-└── requirements.txt
+ingest, when a PDF is provided
+-> optional ask-paper
+-> analyze
+-> plan
+-> implement
+-> validate
+-> report
+-> optional ask-code
 ```
 
-Le plan décrit le rôle de chaque fichier, les composants à implémenter et les dépendances entre modules.
+You can skip steps:
 
-### 5. Contraintes utilisateur
+```bash
+uv run mypaper2code run paper.pdf --no-validate
+uv run mypaper2code run --workspace workspaces/my_paper_20260523-120000 --no-implement --no-report
+```
 
-L'utilisateur peut imposer des contraintes afin d'adapter l'implémentation à ses besoins.
+## Advanced Step-by-Step CLI Workflow
 
-Exemples de contraintes :
+### 1. Ingest a paper
+
+```bash
+uv run mypaper2code ingest paper.pdf
+```
+
+The command prints the created workspace path, for example:
+
+```text
+workspaces/my_paper_20260523-120000
+```
+
+Ingestion creates paper artifacts under `paper/`:
+
+```text
+paper/
+├── original.pdf
+├── extracted_sections.json
+├── chunks.json
+├── tantivy_index/
+├── vectors.npy
+├── vector_metadata.json
+└── retrieval_config.json
+```
+
+### 2. Ask questions about the paper
+
+```bash
+uv run mypaper2code ask-paper "What loss function is used?" --workspace workspaces/my_paper_20260523-120000
+```
+
+`ask` is kept as a backward-compatible alias for `ask-paper`:
+
+```bash
+uv run mypaper2code ask "What datasets are used?" --workspace workspaces/my_paper_20260523-120000
+```
+
+### 3. Set implementation requirements
+
+Requirements are stored in `analysis/requirements.yaml`.
+
+```bash
+uv run mypaper2code requirements set framework pytorch --workspace workspaces/my_paper_20260523-120000
+uv run mypaper2code requirements set dataset cifar10 --workspace workspaces/my_paper_20260523-120000
+uv run mypaper2code requirements set style research --workspace workspaces/my_paper_20260523-120000
+uv run mypaper2code requirements get --workspace workspaces/my_paper_20260523-120000
+```
+
+Supported requirement fields are defined by `ImplementationRequirements`:
 
 ```yaml
 framework: pytorch
-style: research
 dataset: cifar10
+style: research
 config_format: yaml
-target_gpu_memory: 8GB
+target_gpu_memory: null
 implementation_level: minimal
 include_tests: true
 include_training_script: true
 include_evaluation_script: true
-provider: ollama
-model: llama3
+provider: nvidia
+model: mistralai/mistral-medium-3.5-128b
 ```
 
-Ces contraintes permettent de générer une implémentation plus adaptée au contexte réel de l'utilisateur.
-
-Par exemple, un utilisateur peut demander :
-
-- une version minimale pour comprendre l'idée ;
-- une version plus proche du papier original ;
-- une version compatible avec un dataset différent ;
-- une structure orientée recherche ;
-- une structure plus production-ready ;
-- une implémentation avec tests et configuration reproductible ;
-- l'utilisation d'un modèle local via Ollama ;
-- l'utilisation d'un modèle disponible via NVIDIA Build.
-
-### 6. Choix du provider LLM
-
-MyPaper2Code est conçu pour être compatible avec plusieurs fournisseurs de modèles.
-
-L'utilisateur peut choisir le provider et le modèle utilisés pour :
-
-- l'analyse du papier ;
-- les questions/réponses sourcées ;
-- la génération du plan d'implémentation ;
-- la génération du code ;
-- la revue automatique ;
-- la génération du rapport d'hypothèses.
-
-Deux modes principaux sont prévus :
-
-#### Ollama
-
-Le mode Ollama permet d'utiliser des modèles exécutés localement.
-
-Ce mode est utile pour :
-
-- travailler hors ligne ;
-- éviter d'envoyer le contenu du papier à un service externe ;
-- tester différents modèles open source ;
-- garder un environnement de développement entièrement local.
-
-Exemple :
+### 4. Analyze the paper
 
 ```bash
-mypaper2code config set provider ollama
-mypaper2code config set model llama3
+uv run mypaper2code analyze --workspace workspaces/my_paper_20260523-120000
 ```
 
-#### NVIDIA Build
+This writes:
 
-Le mode NVIDIA Build permet d'utiliser des modèles accessibles via la plateforme `https://build.nvidia.com/`.
+```text
+analysis/method_summary.md
+analysis/assumptions.md
+analysis/paper_understanding.json
+```
 
-Ce mode est utile pour :
+`paper_understanding.json` captures the current structured understanding of the
+paper: architecture, loss, datasets, metrics, training hints, ambiguities, and
+source passages.
 
-- tester des modèles performants hébergés ;
-- comparer différents modèles sur les mêmes tâches ;
-- utiliser des modèles spécialisés pour le raisonnement, le code ou la compréhension de documents ;
-- accélérer certaines étapes comme l'analyse, la planification ou la génération de code.
-
-Exemple :
+### 5. Create the implementation plan
 
 ```bash
-mypaper2code config set provider nvidia
-mypaper2code config set model <model-name>
+uv run mypaper2code plan --workspace workspaces/my_paper_20260523-120000
 ```
 
-Le système doit permettre de changer de modèle facilement selon la tâche. Par exemple, l'utilisateur peut choisir un modèle pour la compréhension du papier et un autre pour la génération de code.
+Optional overrides:
 
-### 7. Création d'un workspace
+```bash
+uv run mypaper2code plan \
+  --workspace workspaces/my_paper_20260523-120000 \
+  --framework pytorch \
+  --dataset cifar10 \
+  --style research
+```
 
-Lorsqu'un papier est ingéré et qu'un plan d'implémentation est validé, l'agent crée un **workspace dédié**.
+The plan is written to:
 
-Ce workspace sert d'environnement de travail isolé dans lequel l'agent peut progressivement implémenter le papier.
+```text
+analysis/implementation_plan.md
+analysis/implementation_plan.json
+```
 
-Exemple de structure :
+Unlike a fixed template, the plan is represented as implementation steps. Each
+step has a purpose, target files, symbols, paper source references, and
+assumptions.
+
+### 6. Implement the plan
+
+```bash
+uv run mypaper2code implement --workspace workspaces/my_paper_20260523-120000
+```
+
+`generate` is kept as a backward-compatible alias:
+
+```bash
+uv run mypaper2code generate --workspace workspaces/my_paper_20260523-120000
+```
+
+The implementation is written under:
+
+```text
+generated_code/
+├── configs/
+├── src/
+├── scripts/
+├── tests/
+├── README.md
+└── requirements.txt
+```
+
+The trace is written to:
+
+```text
+analysis/implementation_trace.json
+```
+
+This trace is the main source of truth for linking paper claims to generated
+files and symbols.
+
+### 7. Validate the generated code
+
+```bash
+uv run mypaper2code validate workspaces/my_paper_20260523-120000
+```
+
+Validation writes logs under `runs/`, including import checks, Ruff when
+available, and pytest results.
+
+### 8. Ask questions about the implementation
+
+```bash
+uv run mypaper2code ask-code "Where is the loss implemented?" --workspace workspaces/my_paper_20260523-120000
+```
+
+`ask-code` does not use a code RAG index. It uses:
+
+- `analysis/implementation_trace.json`;
+- direct search through generated source files;
+- file names, symbols, and matched code lines.
+
+This keeps the generated code itself as the source of truth.
+
+### 9. Generate the fidelity report
+
+```bash
+uv run mypaper2code report --workspace workspaces/my_paper_20260523-120000
+```
+
+The report is written to:
+
+```text
+analysis/fidelity_report.md
+```
+
+It summarizes what was implemented, what remains ambiguous, and the current
+fidelity level.
+
+## Workspace Layout
+
+A typical workspace looks like this:
 
 ```text
 workspaces/
@@ -242,336 +301,216 @@ workspaces/
     ├── paper/
     │   ├── original.pdf
     │   ├── extracted_sections.json
-    │   └── chunks.json
+    │   ├── chunks.json
+    │   ├── tantivy_index/
+    │   ├── vectors.npy
+    │   ├── vector_metadata.json
+    │   └── retrieval_config.json
     ├── analysis/
+    │   ├── requirements.yaml
     │   ├── method_summary.md
-    │   ├── implementation_plan.md
     │   ├── assumptions.md
-    │   └── requirements.yaml
+    │   ├── paper_understanding.json
+    │   ├── implementation_plan.md
+    │   ├── implementation_plan.json
+    │   ├── implementation_trace.json
+    │   └── fidelity_report.md
     ├── generated_code/
     │   ├── configs/
     │   ├── src/
-    │   ├── tests/
     │   ├── scripts/
-    │   └── README.md
+    │   ├── tests/
+    │   ├── README.md
+    │   └── requirements.txt
     ├── runs/
-    │   ├── lint.log
-    │   ├── tests.log
-    │   └── dry_run.log
+    │   ├── imports.log
+    │   ├── ruff.log
+    │   └── pytest.log
     └── metadata.json
 ```
 
-Le workspace permet de conserver :
+## Search Design
 
-- le papier original ;
-- les chunks indexés ;
-- les réponses aux questions importantes ;
-- le plan d'implémentation ;
-- les contraintes utilisateur ;
-- le code généré ;
-- les logs de validation ;
-- les hypothèses prises par l'agent.
+Paper retrieval is hybrid:
 
-L'objectif est de rendre la génération traçable et itérative. L'utilisateur peut inspecter, modifier ou relancer certaines étapes sans perdre l'historique du projet.
-
-### 8. Génération de code
-
-Le système génère progressivement les fichiers du projet.
-
-La génération ne se fait pas comme une réponse unique et monolithique, mais comme une construction incrémentale :
-
-1. génération de la structure du workspace ;
-2. génération des fichiers de configuration ;
-3. génération des modules de données ;
-4. génération du modèle ;
-5. génération de la fonction de perte ;
-6. génération de la boucle d'entraînement ;
-7. génération de l'évaluation ;
-8. génération des tests ;
-9. génération du README d'implémentation.
-
-Chaque fichier généré doit être lié, lorsque c'est possible, aux éléments du papier qui justifient son contenu.
-
-### 9. Validation du code généré
-
-MyPaper2Code intègre une étape de validation minimale afin de détecter les erreurs évidentes.
-
-Cette étape peut inclure :
-
-- vérification des imports ;
-- linting avec Ruff ;
-- exécution de tests unitaires ;
-- dry-run sur des données factices ;
-- vérification de la cohérence entre configuration et code ;
-- détection de fichiers incomplets ou de fonctions non implémentées.
-
-L'objectif n'est pas de garantir une reproduction scientifique complète, mais de produire un squelette de projet exécutable et améliorable.
-
-### 10. Rapport d'hypothèses et de fidélité
-
-Un des éléments centraux du projet est la génération d'un rapport final.
-
-Ce rapport documente :
-
-- les sections du papier utilisées ;
-- les composants implémentés ;
-- les détails explicitement présents dans le papier ;
-- les hypothèses prises par l'agent ;
-- les éléments manquants ou ambigus ;
-- les écarts avec la méthode originale ;
-- les suggestions pour améliorer la reproduction ;
-- le niveau de confiance global.
-
-Exemple :
+1. Tantivy retrieves full-text matches over `chunk_id`, `paper_id`, `section`,
+   `page`, and `text`.
+2. Vector search computes exact cosine similarity over chunk embeddings stored in
+   `vectors.npy`.
+3. RRF merges lexical and vector rankings:
 
 ```text
-Assumption Report
-
-Implemented:
-- Model backbone
-- Training loop
-- Loss function
-- Evaluation metrics
-
-Unclear in paper:
-- Exact learning rate schedule
-- Batch size for ablation experiments
-- Data augmentation details
-
-Assumptions made:
-- AdamW optimizer used by default
-- Batch size set to 64
-- Cosine scheduler selected for training stability
-
-Fidelity level:
-- Medium
+rrf_score = sum(1 / (rrf_k + rank))
 ```
 
-Ce rapport rend le système plus transparent et plus crédible. Il évite de présenter le code généré comme une reproduction exacte lorsque le papier ne fournit pas tous les détails nécessaires.
+If `sentence-transformers` is available, embeddings use
+`sentence-transformers/all-MiniLM-L6-v2`. If not, the system falls back to a
+deterministic hashing embedding so the MVP remains runnable locally.
 
-## Architecture proposée
+## Providers
 
-Le système peut être organisé autour de plusieurs agents spécialisés.
+Global provider configuration is stored in:
 
-### PaperParser
+```text
+~/.mypaper2code/config.json
+```
 
-Responsable de l'extraction du contenu du papier.
-
-Il extrait :
-
-- texte brut ;
-- sections ;
-- titres ;
-- tableaux ;
-- légendes de figures ;
-- références utiles.
-
-### PaperRetriever
-
-Responsable de la recherche d'information dans le papier.
-
-Il permet de répondre aux questions utilisateur avec des sources précises.
-
-### MethodAnalyzer
-
-Responsable de l'analyse technique du papier.
-
-Il identifie :
-
-- architecture ;
-- loss ;
-- datasets ;
-- métriques ;
-- protocole expérimental ;
-- détails d'entraînement ;
-- éléments nécessaires à l'implémentation.
-
-### ImplementationPlanner
-
-Responsable de la transformation de l'analyse en plan de projet.
-
-Il propose :
-
-- une arborescence ;
-- les fichiers à créer ;
-- les modules à implémenter ;
-- les dépendances entre composants.
-
-### RequirementResolver
-
-Responsable de l'application des contraintes utilisateur.
-
-Il adapte le plan selon :
-
-- le framework ;
-- le dataset ;
-- le style de code ;
-- les limites matérielles ;
-- le niveau de fidélité souhaité ;
-- le provider LLM choisi ;
-- le modèle sélectionné.
-
-### WorkspaceManager
-
-Responsable de la création et de la gestion du workspace.
-
-Il conserve :
-
-- les fichiers du papier ;
-- les analyses intermédiaires ;
-- les requirements ;
-- les fichiers générés ;
-- les logs ;
-- les métadonnées du projet.
-
-### CodeWriter
-
-Responsable de la génération de code.
-
-Il génère les fichiers un par un, en respectant le plan d'implémentation et les contraintes utilisateur.
-
-### CodeReviewer
-
-Responsable de la revue automatique.
-
-Il vérifie :
-
-- la cohérence globale ;
-- les imports ;
-- les signatures de fonctions ;
-- les TODOs ;
-- les erreurs probables ;
-- l'alignement avec les requirements.
-
-### ExperimentRunner
-
-Responsable de l'exécution contrôlée.
-
-Il peut lancer :
-
-- tests unitaires ;
-- lint ;
-- dry-run ;
-- scripts d'entraînement minimaux.
-
-## Stack technique envisagée
-
-### Environnement de développement
-
-Le projet utilise **uv** pour gérer l'environnement Python, les dépendances et l'exécution des commandes.
-
-L'utilisation de `uv` permet de disposer d'un environnement reproductible, rapide à installer et simple à manipuler.
-
-Exemples :
+Commands:
 
 ```bash
-uv sync
-uv run mypaper2code --help
+uv run mypaper2code config set provider nvidia
+uv run mypaper2code config set model mistralai/mistral-medium-3.5-128b
+uv run mypaper2code config get
+```
+
+Provider interfaces currently exist for:
+
+- `ollama`
+- `nvidia`
+
+`nvidia` is the default provider. When NVIDIA is selected and unavailable,
+MyPaper2Code tries Ollama next. If Ollama is unavailable too, the command fails.
+
+### Ollama
+
+Ollama uses the local chat API:
+
+```text
+POST http://localhost:11434/api/chat
+```
+
+Configure it:
+
+```bash
+uv run mypaper2code config set provider ollama
+uv run mypaper2code config set model llama3
+uv run mypaper2code config set ollama_base_url http://localhost:11434
+```
+
+Then test it:
+
+```bash
+uv run mypaper2code providers test
+```
+
+The selected Ollama model must already be available locally, for example through:
+
+```bash
+ollama pull llama3
+```
+
+### NVIDIA
+
+NVIDIA uses the OpenAI-compatible NIM endpoint:
+
+```text
+POST https://integrate.api.nvidia.com/v1/chat/completions
+```
+
+Configure it:
+
+```bash
+uv run mypaper2code config set provider nvidia
+uv run mypaper2code config set model mistralai/mistral-medium-3.5-128b
+uv run mypaper2code config set nvidia_base_url https://integrate.api.nvidia.com/v1
+uv run mypaper2code config set nvidia_api_key_env NVIDIA_API_KEY
+```
+
+Set your API key in the environment or in a local `.env` file. The `.env` file is
+loaded automatically and does not override variables already present in the
+environment.
+
+```bash
+$env:NVIDIA_API_KEY="your-api-key"
+```
+
+Example `.env`:
+
+```bash
+NVIDIA_API_KEY="your-api-key"
+```
+
+Then test it:
+
+```bash
+uv run mypaper2code providers test
+```
+
+You can override provider and model for a single test:
+
+```bash
+uv run mypaper2code providers test --provider ollama --model llama3
+uv run mypaper2code providers test --provider nvidia --model mistralai/mistral-medium-3.5-128b
+```
+
+When `analyze` runs with `provider=ollama` or `provider=nvidia`, MyPaper2Code
+uses the selected model to extract structured implementation facts from retrieved
+paper passages. If NVIDIA fails, Ollama is tried as the fallback. If the selected
+provider chain fails or returns invalid JSON, the command fails.
+
+## Internal Modules
+
+Main package areas:
+
+```text
+src/mypaper2code/
+├── cli.py
+├── core/
+│   ├── io.py
+│   ├── models.py
+│   └── text.py
+├── providers/
+│   └── base.py
+└── services/
+    ├── analysis.py
+    ├── code_qa.py
+    ├── config.py
+    ├── generation.py
+    ├── ingestion.py
+    ├── planning.py
+    ├── report.py
+    ├── requirements.py
+    ├── validation.py
+    ├── workspace.py
+    └── search/
+        ├── hybrid.py
+        ├── rrf.py
+        ├── tantivy_index.py
+        └── vector_index.py
+```
+
+## Development
+
+Run the full checks:
+
+```bash
 uv run pytest
 uv run ruff check .
+uv run mypaper2code --help
 ```
 
-### Backend
+Current test coverage includes:
 
-- Python
-- FastAPI
-- Pydantic
-- SQLAlchemy ou stockage JSON pour le MVP
+- PDF extraction and chunking;
+- workspace creation;
+- Tantivy/vector index creation and reload;
+- RRF deduplication;
+- CLI commands;
+- requirements persistence;
+- plan-driven implementation;
+- implementation trace;
+- code question answering;
+- fidelity report;
+- validation of generated code.
+- Ollama and NVIDIA provider payload construction without making network calls.
 
-### Parsing PDF
+## Roadmap
 
-- PyMuPDF
-- éventuellement `unstructured` ou `marker` pour une extraction plus avancée
+Next useful implementation steps:
 
-### RAG
-
-- Chroma, Qdrant ou FAISS
-- SentenceTransformers ou embeddings locaux
-- BM25 pour recherche lexicale
-- reranker optionnel
-
-### Agents et LLM
-
-- orchestration maison ou LangGraph
-- support Ollama local
-- support NVIDIA Build
-- sélection configurable du modèle
-- prompts versionnés
-
-### Génération et validation de code
-
-- génération de fichiers multi-modules
-- Ruff
-- pytest
-- exécution contrôlée via subprocess
-- sandbox Docker dans une version avancée
-
-### Interface
-
-- CLI pour le MVP
-- API FastAPI
-- interface web légère dans une version ultérieure
-
-## Exemple de workflow CLI
-
-```bash
-uv run mypaper2code ingest paper.pdf
-
-uv run mypaper2code ask "Quelle est la fonction de perte utilisée ?"
-
-uv run mypaper2code plan \
-  --framework pytorch \
-  --dataset cifar10 \
-  --style research \
-  --config yaml \
-  --provider ollama \
-  --model llama3
-
-uv run mypaper2code generate \
-  --workspace ./workspaces/my_paper
-
-uv run mypaper2code validate ./workspaces/my_paper
-```
-
-## Exemple de workflow API
-
-```text
-POST /papers
-POST /papers/{paper_id}/ask
-POST /papers/{paper_id}/analyze
-POST /papers/{paper_id}/plan
-POST /papers/{paper_id}/workspace
-POST /papers/{paper_id}/generate
-POST /papers/{paper_id}/validate
-```
-
-## Limites assumées
-
-MyPaper2Code ne prétend pas résoudre automatiquement tous les problèmes liés à la reproduction scientifique.
-
-Certaines limites sont assumées :
-
-- les papiers peuvent être incomplets ;
-- certaines équations peuvent être difficiles à extraire proprement ;
-- les figures et tableaux peuvent nécessiter une interprétation approximative ;
-- les résultats expérimentaux peuvent dépendre de détails non publiés ;
-- le code généré peut nécessiter une revue humaine ;
-- les choix par défaut doivent être explicitement documentés ;
-- les performances obtenues peuvent différer de celles du papier original.
-
-Le système est donc conçu comme un assistant de reproduction, et non comme un générateur parfait.
-
-## Vision du projet
-
-À terme, MyPaper2Code pourrait devenir un environnement complet pour explorer, comprendre et prototyper rapidement des articles de recherche en IA.
-
-L'objectif est de permettre à un utilisateur de passer plus rapidement de la lecture d'un papier à une première implémentation expérimentale, tout en conservant une traçabilité claire entre le papier original, les choix techniques, les contraintes utilisateur et le code généré.
-
-Le projet met l'accent sur quatre principes :
-
-1. **Transparence** : chaque décision importante doit être expliquée ou reliée au papier.
-2. **Contrôle utilisateur** : l'utilisateur peut imposer ses contraintes et orienter la génération.
-3. **Modularité** : le provider LLM, le modèle, le framework et la structure du projet doivent rester configurables.
-4. **Validation progressive** : le code généré doit être vérifiable, testable et améliorable.
-
-MyPaper2Code se positionne ainsi comme un pont entre lecture scientifique, compréhension assistée par LLM et prototypage logiciel reproductible.
+1. Improve LLM prompts and schema validation for paper understanding.
+2. Add LLM-assisted implementation step generation with stricter review gates.
+3. Add richer table/figure extraction.
+4. Improve plan execution with per-step validation and repair.
+5. Add stronger AST-based code inspection for `ask-code`.
+6. Add optional API/server mode after the CLI workflow is stable.

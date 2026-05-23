@@ -126,8 +126,8 @@ class IngestionService:
     def ingest(
         self,
         pdf_path: Path,
-        provider: str = "stub",
-        model: str = "stub",
+        provider: str = "nvidia",
+        model: str = "mistralai/mistral-medium-3.5-128b",
     ) -> Path:
         pdf_path = pdf_path.resolve()
         pages = extract_pdf_pages(pdf_path)

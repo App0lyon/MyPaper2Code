@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+workspaces/
+*.pdf
+
 # C extensions
 *.so
 

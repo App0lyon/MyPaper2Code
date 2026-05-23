@@ -5,9 +5,16 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from mypaper2code.core.models import ImplementationRequirements
+from mypaper2code.providers.base import (
+    NVIDIA_DEFAULT_MODEL,
+    OLLAMA_DEFAULT_MODEL,
+    ProviderError,
+    provider_for,
+)
 from mypaper2code.services.analysis import MethodAnalyzer
 from mypaper2code.services.code_qa import CodeQuestionAnswerer
 from mypaper2code.services.config import load_config, set_config
@@ -27,9 +34,161 @@ from mypaper2code.services.workspace import WorkspaceManager
 app = typer.Typer(help="Local assistant for paper-to-code workspaces.")
 config_app = typer.Typer(help="Read and update MyPaper2Code configuration.")
 requirements_app = typer.Typer(help="Read and update workspace implementation requirements.")
+providers_app = typer.Typer(help="Test configured LLM providers.")
 app.add_typer(config_app, name="config")
 app.add_typer(requirements_app, name="requirements")
+app.add_typer(providers_app, name="providers")
 console = Console()
+
+
+@app.command()
+def run(
+    pdf: Annotated[
+        Path | None,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional PDF to ingest before running the workflow.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        Path | None,
+        typer.Option(
+            "--workspace",
+            "-w",
+            exists=True,
+            file_okay=False,
+            help="Existing workspace to continue.",
+        ),
+    ] = None,
+    ask_paper_question: str | None = typer.Option(
+        None,
+        "--ask-paper",
+        help="Ask a sourced question about the paper after ingestion.",
+    ),
+    ask_code_question: str | None = typer.Option(
+        None,
+        "--ask-code",
+        help="Ask a question about the implementation after implement.",
+    ),
+    framework: str | None = None,
+    dataset: str | None = None,
+    style: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    analyze_: bool = typer.Option(True, "--analyze/--no-analyze", help="Run paper analysis."),
+    plan_: bool = typer.Option(True, "--plan/--no-plan", help="Create/update implementation plan."),
+    implement_: bool = typer.Option(
+        True,
+        "--implement/--no-implement",
+        help="Implement the plan.",
+    ),
+    validate_: bool = typer.Option(
+        True,
+        "--validate/--no-validate",
+        help="Validate generated code.",
+    ),
+    report_: bool = typer.Option(True, "--report/--no-report", help="Write fidelity report."),
+) -> None:
+    """Single entrypoint for the full paper-to-code workflow."""
+    if pdf is None and workspace is None:
+        raise typer.BadParameter("Provide either a PDF argument or --workspace.")
+    config = load_config()
+    selected_provider = provider or config["provider"]
+    selected_model = model or config["model"]
+    _print_header("MyPaper2Code workflow")
+    _print_context(
+        "Run context",
+        {
+            "PDF": str(pdf) if pdf else "not provided",
+            "Workspace": str(workspace) if workspace else "will be created",
+            "Provider": selected_provider,
+            "Model": selected_model,
+            "Analyze": _yes_no(analyze_),
+            "Plan": _yes_no(plan_),
+            "Implement": _yes_no(implement_),
+            "Validate": _yes_no(validate_),
+            "Report": _yes_no(report_),
+        },
+    )
+
+    if pdf is not None:
+        _print_step("Ingest", "Extracting PDF text, chunking passages, and building indexes.")
+        console.print(f"[dim]Input PDF:[/dim] {pdf}")
+        with console.status("Creating workspace and retrieval indexes...", spinner="dots"):
+            workspace = IngestionService().ingest(
+                pdf,
+                provider=selected_provider,
+                model=selected_model,
+            )
+        _print_success("Workspace created")
+        _print_path("Workspace", workspace)
+    else:
+        workspace = WorkspaceManager.ensure(workspace)
+        _print_step("Workspace", "Continuing from an existing workspace.")
+        _print_path("Workspace", workspace)
+
+    assert workspace is not None
+    requirements = _merged_requirements(
+        workspace,
+        framework=framework,
+        dataset=dataset,
+        style=style,
+        provider=selected_provider,
+        model=selected_model,
+    )
+    _print_requirements(requirements)
+
+    if ask_paper_question:
+        _print_step("Paper question", "Retrieving sourced passages from the paper index.")
+        _print_paper_hits(workspace, ask_paper_question)
+
+    if analyze_:
+        _print_step("Analyze", "Asking the provider chain for structured paper understanding.")
+        _print_provider_chain(selected_provider, selected_model)
+        with console.status(
+            "Reading retrieved passages and calling the provider...",
+            spinner="dots",
+        ):
+            summary, assumptions = MethodAnalyzer().analyze(workspace)
+        _print_success("Paper analysis written")
+        _print_path("Summary", summary)
+        _print_path("Assumptions", assumptions)
+        _print_path("Understanding JSON", workspace / "analysis" / "paper_understanding.json")
+
+    if plan_:
+        _print_step("Plan", "Creating the implementation plan from requirements and paper facts.")
+        with console.status("Writing plan artifacts...", spinner="dots"):
+            plan = ImplementationPlanner().create_plan(workspace, requirements)
+        _print_success(f"Implementation plan ready with {len(plan.steps)} steps")
+        _print_path("Plan Markdown", workspace / "analysis" / "implementation_plan.md")
+        _print_path("Plan JSON", workspace / "analysis" / "implementation_plan.json")
+
+    if implement_:
+        _print_step("Implement", "Generating the planned source tree and implementation trace.")
+        with console.status("Writing generated code...", spinner="dots"):
+            generated = CodeWriter().implement(workspace)
+        _print_success("Generated implementation written")
+        _print_path("Generated code", generated)
+        _print_path("Trace", workspace / "analysis" / "implementation_trace.json")
+
+    if validate_:
+        _print_step("Validate", "Running compile, Ruff when available, and pytest checks.")
+        _print_validation_results(workspace)
+
+    if report_:
+        _print_step("Report", "Writing the fidelity and assumptions report.")
+        with console.status("Building report...", spinner="dots"):
+            report_path = ReportWriter().write(workspace)
+        _print_success("Report written")
+        _print_path("Report", report_path)
+
+    if ask_code_question:
+        _print_step("Code question", "Searching the trace and generated files.")
+        _print_code_answers(workspace, ask_code_question)
+
+    _print_success("Workflow complete")
 
 
 @app.command()
@@ -40,12 +199,26 @@ def ingest(
 ) -> None:
     """Ingest a PDF and create a workspace."""
     config = load_config()
-    workspace = IngestionService().ingest(
-        pdf,
-        provider=provider or config["provider"],
-        model=model or config["model"],
+    selected_provider = provider or config["provider"]
+    selected_model = model or config["model"]
+    _print_header("Ingest paper")
+    _print_context(
+        "Ingestion context",
+        {"PDF": str(pdf), "Provider": selected_provider, "Model": selected_model},
     )
-    console.print(str(workspace))
+    with console.status(
+        "Extracting PDF, chunking text, and building search indexes...",
+        spinner="dots",
+    ):
+        workspace = IngestionService().ingest(
+            pdf,
+            provider=selected_provider,
+            model=selected_model,
+        )
+    _print_success("Workspace created")
+    _print_path("Workspace", workspace)
+    _print_path("Chunks", workspace / "paper" / "chunks.json")
+    _print_path("Retrieval config", workspace / "paper" / "retrieval_config.json")
 
 
 @app.command()
@@ -56,11 +229,23 @@ def ask_paper(
 ) -> None:
     """Ask a sourced question against an ingested workspace."""
     WorkspaceManager.ensure(workspace)
-    hits = HybridRetriever(workspace).search(question, limit=limit)
+    _print_header("Paper question")
+    _print_context(
+        "Question context",
+        {"Workspace": str(workspace), "Question": question, "Limit": limit},
+    )
+    _print_paper_hits(workspace, question, limit=limit)
+
+
+def _print_paper_hits(workspace: Path, question: str, limit: int = 5) -> None:
+    console.print(f"[dim]Searching paper passages for:[/dim] {question}")
+    with console.status("Running hybrid retrieval...", spinner="dots"):
+        hits = HybridRetriever(workspace).search(question, limit=limit)
     if not hits:
-        console.print("No relevant passage found.")
+        _print_failure("No relevant paper passage found.")
         raise typer.Exit(code=1)
-    table = Table(title="Hybrid RRF results")
+    _print_success(f"Found {len(hits)} sourced passage(s)")
+    table = Table(title="Hybrid retrieval results")
     table.add_column("Score")
     table.add_column("Page")
     table.add_column("Section")
@@ -88,12 +273,24 @@ def ask_code(
 ) -> None:
     """Ask about the generated implementation using trace and direct file search."""
     WorkspaceManager.ensure(workspace)
-    answers = CodeQuestionAnswerer().answer(workspace, question, limit=limit)
+    _print_header("Code question")
+    _print_context(
+        "Question context",
+        {"Workspace": str(workspace), "Question": question, "Limit": limit},
+    )
+    _print_code_answers(workspace, question, limit=limit)
+
+
+def _print_code_answers(workspace: Path, question: str, limit: int = 5) -> None:
+    console.print(f"[dim]Searching implementation evidence for:[/dim] {question}")
+    with console.status("Searching trace and generated files...", spinner="dots"):
+        answers = CodeQuestionAnswerer().answer(workspace, question, limit=limit)
     if not answers:
-        console.print("No implementation evidence found.")
+        _print_failure("No implementation evidence found.")
         raise typer.Exit(code=1)
+    _print_success(f"Found {len(answers)} implementation evidence item(s)")
     for answer in answers:
-        console.print(f"- {answer}")
+        console.print(f"[bold]-[/bold] {answer}")
 
 
 @app.command()
@@ -102,9 +299,23 @@ def analyze(
 ) -> None:
     """Extract a method summary and uncertainty report."""
     WorkspaceManager.ensure(workspace)
-    summary, assumptions = MethodAnalyzer().analyze(workspace)
-    console.print(f"Wrote {summary}")
-    console.print(f"Wrote {assumptions}")
+    requirements = load_requirements(workspace)
+    _print_header("Analyze paper")
+    _print_context(
+        "Analysis context",
+        {
+            "Workspace": str(workspace),
+            "Provider": requirements.provider,
+            "Model": requirements.model,
+        },
+    )
+    _print_provider_chain(requirements.provider, requirements.model)
+    with console.status("Retrieving passages and extracting structured facts...", spinner="dots"):
+        summary, assumptions = MethodAnalyzer().analyze(workspace)
+    _print_success("Paper analysis written")
+    _print_path("Summary", summary)
+    _print_path("Assumptions", assumptions)
+    _print_path("Understanding JSON", workspace / "analysis" / "paper_understanding.json")
 
 
 @app.command(name="plan")
@@ -119,22 +330,22 @@ def plan_command(
     """Create an implementation plan for a workspace."""
     WorkspaceManager.ensure(workspace)
     config = load_config()
-    stored = load_requirements(workspace)
-    requirements = ImplementationRequirements(
-        **(
-            stored.model_dump()
-            | {
-                "framework": framework or stored.framework,
-                "dataset": dataset or stored.dataset,
-                "style": style or stored.style,
-                "provider": provider or stored.provider or config["provider"],
-                "model": model or stored.model or config["model"],
-            }
-        )
+    requirements = _merged_requirements(
+        workspace,
+        framework=framework,
+        dataset=dataset,
+        style=style,
+        provider=provider or config["provider"],
+        model=model or config["model"],
     )
-    save_requirements(workspace, requirements)
-    ImplementationPlanner().create_plan(workspace, requirements)
-    console.print(str(workspace / "analysis" / "implementation_plan.md"))
+    _print_header("Plan implementation")
+    _print_path("Workspace", workspace)
+    _print_requirements(requirements)
+    with console.status("Creating implementation plan...", spinner="dots"):
+        plan = ImplementationPlanner().create_plan(workspace, requirements)
+    _print_success(f"Implementation plan ready with {len(plan.steps)} steps")
+    _print_path("Plan Markdown", workspace / "analysis" / "implementation_plan.md")
+    _print_path("Plan JSON", workspace / "analysis" / "implementation_plan.json")
 
 
 @app.command()
@@ -143,8 +354,13 @@ def implement(
 ) -> None:
     """Implement the paper-specific plan step by step."""
     WorkspaceManager.ensure(workspace)
-    generated = CodeWriter().implement(workspace)
-    console.print(str(generated))
+    _print_header("Implement plan")
+    _print_path("Workspace", workspace)
+    with console.status("Writing generated code and trace...", spinner="dots"):
+        generated = CodeWriter().implement(workspace)
+    _print_success("Generated implementation written")
+    _print_path("Generated code", generated)
+    _print_path("Trace", workspace / "analysis" / "implementation_trace.json")
 
 
 @app.command()
@@ -161,8 +377,12 @@ def report(
 ) -> None:
     """Write a fidelity and assumption report."""
     WorkspaceManager.ensure(workspace)
-    path = ReportWriter().write(workspace)
-    console.print(str(path))
+    _print_header("Fidelity report")
+    _print_path("Workspace", workspace)
+    with console.status("Writing report...", spinner="dots"):
+        path = ReportWriter().write(workspace)
+    _print_success("Report written")
+    _print_path("Report", path)
 
 
 @requirements_app.command("get")
@@ -171,7 +391,9 @@ def requirements_get(
 ) -> None:
     """Read workspace implementation requirements."""
     WorkspaceManager.ensure(workspace)
-    console.print_json(data=load_requirements(workspace).model_dump(mode="json"))
+    _print_header("Requirements")
+    _print_path("Workspace", workspace)
+    _print_requirements(load_requirements(workspace))
 
 
 @requirements_app.command("set")
@@ -182,8 +404,11 @@ def requirements_set(
 ) -> None:
     """Set one workspace implementation requirement."""
     WorkspaceManager.ensure(workspace)
+    _print_header("Update requirement")
+    console.print(f"[dim]Setting[/dim] {key} = {value}")
     requirements = set_requirement(workspace, key, value)
-    console.print_json(data=requirements.model_dump(mode="json"))
+    _print_success("Requirement saved")
+    _print_requirements(requirements)
 
 
 @app.callback()
@@ -197,31 +422,200 @@ def validate(
 ) -> None:
     """Run minimal validation checks for generated code."""
     WorkspaceManager.ensure(workspace)
-    results = ExperimentRunner().validate(workspace)
+    _print_header("Validate generated code")
+    _print_path("Workspace", workspace)
+    _print_validation_results(workspace)
+
+
+def _print_validation_results(workspace: Path) -> None:
+    with console.status("Running validation commands...", spinner="dots"):
+        results = ExperimentRunner().validate(workspace)
     failed = False
+    table = Table(title="Validation results")
+    table.add_column("Status")
+    table.add_column("Check")
+    table.add_column("Command")
+    table.add_column("Log")
     for result in results:
-        status = "PASS" if result.passed else "FAIL"
+        status = "[green]PASS[/green]" if result.passed else "[red]FAIL[/red]"
         failed = failed or not result.passed
-        console.print(f"{status} {result.name}: {result.log_path}")
+        table.add_row(status, result.name, result.command, result.log_path)
+    console.print(table)
     if failed:
+        _print_failure("Validation failed. Open the log paths above for details.")
         raise typer.Exit(code=1)
+    _print_success("All validation checks passed")
+
+
+def _merged_requirements(
+    workspace: Path,
+    framework: str | None,
+    dataset: str | None,
+    style: str | None,
+    provider: str | None,
+    model: str | None,
+) -> ImplementationRequirements:
+    stored = load_requirements(workspace)
+    requirements = ImplementationRequirements(
+        **(
+            stored.model_dump()
+            | {
+                "framework": framework or stored.framework,
+                "dataset": dataset or stored.dataset,
+                "style": style or stored.style,
+                "provider": provider or stored.provider,
+                "model": model or stored.model,
+            }
+        )
+    )
+    save_requirements(workspace, requirements)
+    return requirements
 
 
 @config_app.command("get")
 def config_get(key: str | None = None) -> None:
     """Read configuration."""
     config = load_config()
+    _print_header("Configuration")
     if key:
-        console.print(config[key])
+        console.print(f"[bold]{key}[/bold]: {config[key]}")
     else:
-        console.print_json(data=config)
+        _print_context("Current config", {str(k): str(v) for k, v in config.items()})
 
 
 @config_app.command("set")
 def config_set(key: str, value: str) -> None:
     """Set configuration value."""
-    config = set_config(key, value)
-    console.print_json(data=config)
+    _print_header("Update configuration")
+    console.print(f"[dim]Setting[/dim] {key} = {value}")
+    try:
+        config = set_config(key, value)
+    except (KeyError, ValueError) as exc:
+        _print_failure(f"Config error: {exc}")
+        raise typer.Exit(code=1) from exc
+    _print_success("Configuration saved")
+    _print_context("Current config", {str(k): str(v) for k, v in config.items()})
+
+
+@providers_app.command("test")
+def providers_test(
+    prompt: str = typer.Option(
+        "Reply with the single word ok.",
+        help="Prompt sent to the provider.",
+    ),
+    provider: str | None = typer.Option(None, help="Override configured provider."),
+    model: str | None = typer.Option(None, help="Override configured model."),
+) -> None:
+    """Send a small completion request to the selected provider."""
+    config = load_config()
+    provider_name = (provider or config["provider"]).lower()
+    errors: list[str] = []
+    _print_header("Provider test")
+    _print_context(
+        "Provider context",
+        {"Requested provider": provider_name, "Requested model": model or config["model"]},
+    )
+    try:
+        candidates = _provider_order(provider_name)
+    except ProviderError as exc:
+        _print_failure(f"Provider error: {exc}")
+        raise typer.Exit(code=1) from exc
+    for candidate in candidates:
+        selected = provider_for(
+            candidate,
+            _model_for_provider(candidate, model or config["model"]),
+            ollama_base_url=config["ollama_base_url"],
+            nvidia_base_url=config["nvidia_base_url"],
+            nvidia_api_key_env=config["nvidia_api_key_env"],
+        )
+        try:
+            console.print(f"[dim]Trying provider:[/dim] {candidate} ({selected.model})")
+            response = selected.complete(prompt, max_tokens=64)
+            _print_success(f"Provider `{candidate}` responded")
+            console.print(Panel(response, title="Provider response", border_style="green"))
+            return
+        except ProviderError as exc:
+            errors.append(f"{candidate}: {exc}")
+            _print_failure(f"Provider `{candidate}` failed: {exc}")
+    _print_failure(f"Provider error: {'; '.join(errors)}")
+    raise typer.Exit(code=1)
+
+
+def _provider_order(provider_name: str) -> list[str]:
+    if provider_name == "nvidia":
+        return ["nvidia", "ollama"]
+    if provider_name == "ollama":
+        return ["ollama"]
+    raise ProviderError(f"Unsupported provider `{provider_name}`. Use `nvidia` or `ollama`.")
+
+
+def _model_for_provider(provider_name: str, model: str) -> str:
+    if provider_name == "ollama" and model == NVIDIA_DEFAULT_MODEL:
+        return OLLAMA_DEFAULT_MODEL
+    if provider_name == "nvidia" and model in {"", OLLAMA_DEFAULT_MODEL, "stub"}:
+        return NVIDIA_DEFAULT_MODEL
+    if provider_name == "ollama" and model in {"", "stub"}:
+        return OLLAMA_DEFAULT_MODEL
+    return model
+
+
+def _print_header(title: str) -> None:
+    console.print()
+    console.print(Panel.fit(f"[bold]{title}[/bold]", border_style="cyan"))
+
+
+def _print_step(title: str, detail: str) -> None:
+    console.print()
+    console.rule(f"[bold cyan]{title}")
+    console.print(f"[dim]{detail}[/dim]")
+
+
+def _print_success(message: str) -> None:
+    console.print(f"[green]OK[/green] {message}")
+
+
+def _print_failure(message: str) -> None:
+    console.print(f"[red]ERROR[/red] {message}")
+
+
+def _print_path(label: str, path: Path) -> None:
+    console.print(f"[bold]{label}:[/bold] {path}")
+
+
+def _print_context(title: str, values: dict[str, object]) -> None:
+    table = Table(title=title, show_header=False)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    for key, value in values.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+
+def _print_requirements(requirements: ImplementationRequirements) -> None:
+    _print_context(
+        "Implementation requirements",
+        {
+            "Framework": requirements.framework,
+            "Dataset": requirements.dataset,
+            "Style": requirements.style,
+            "Implementation level": requirements.implementation_level,
+            "Include tests": _yes_no(requirements.include_tests),
+            "Training script": _yes_no(requirements.include_training_script),
+            "Evaluation script": _yes_no(requirements.include_evaluation_script),
+            "Provider": requirements.provider,
+            "Model": requirements.model,
+        },
+    )
+
+
+def _print_provider_chain(provider_name: str, model: str) -> None:
+    chain = " -> ".join(_provider_order(provider_name))
+    console.print(f"[bold]Provider chain:[/bold] {chain}")
+    console.print(f"[bold]Requested model:[/bold] {model}")
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 if __name__ == "__main__":

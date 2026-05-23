@@ -17,8 +17,8 @@ class WorkspaceManager:
         self,
         paper_path: Path,
         title: str,
-        provider: str = "stub",
-        model: str = "stub",
+        provider: str = "nvidia",
+        model: str = "mistralai/mistral-medium-3.5-128b",
     ) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         paper_id = slugify(title or paper_path.stem)

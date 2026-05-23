@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fitz
 from typer.testing import CliRunner
 
 from mypaper2code.cli import app
@@ -12,6 +13,7 @@ from mypaper2code.core.models import (
     PaperMetadata,
     WorkspaceMetadata,
 )
+from mypaper2code.providers.base import NvidiaProvider
 from mypaper2code.services.generation import CodeWriter
 from mypaper2code.services.planning import ImplementationPlanner
 from mypaper2code.services.search.hybrid import HybridRetriever
@@ -43,8 +45,33 @@ def make_workspace(path: Path) -> Path:
         )
     ]
     write_json(path / "paper" / "chunks.json", [chunk.model_dump() for chunk in chunks])
+    write_json(
+        path / "analysis" / "paper_understanding.json",
+        {
+            "architecture": "mlp",
+            "loss": "cross_entropy",
+            "datasets": ["cifar10"],
+            "metrics": ["accuracy"],
+            "training": [],
+            "ambiguities": [],
+            "sources": [],
+        },
+    )
     HybridRetriever.build(path, chunks)
     return path
+
+
+def make_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "A Simple Paper\nAbstract\nThis paper uses a neural network.\n"
+        "Method\nThe method uses cross entropy loss.\n"
+        "Experiments\nWe evaluate on CIFAR-10 with accuracy.",
+    )
+    doc.save(path)
+    doc.close()
 
 
 def test_plan_and_generation(tmp_path: Path) -> None:
@@ -112,3 +139,57 @@ def test_requirements_implement_ask_code_and_report(tmp_path: Path) -> None:
     assert report_result.exit_code == 0, report_result.output
     assert (workspace / "analysis" / "implementation_trace.json").exists()
     assert (workspace / "analysis" / "fidelity_report.md").exists()
+
+
+def test_cli_run_existing_workspace(tmp_path: Path, monkeypatch) -> None:
+    workspace = make_workspace(tmp_path / "workspace")
+    monkeypatch.setattr(
+        NvidiaProvider,
+        "complete",
+        lambda *args, **kwargs: (
+            '{"architecture":"mlp","loss":"cross_entropy","datasets":["cifar10"],'
+            '"metrics":["accuracy"],"training":[],"ambiguities":[]}'
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--workspace",
+            str(workspace),
+            "--dataset",
+            "mnist",
+            "--ask-paper",
+            "what loss is used",
+            "--ask-code",
+            "where is the model",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (workspace / "analysis" / "implementation_plan.json").exists()
+    assert (workspace / "analysis" / "implementation_trace.json").exists()
+    assert (workspace / "analysis" / "fidelity_report.md").exists()
+
+
+def test_cli_run_pdf_entrypoint(tmp_path: Path, monkeypatch) -> None:
+    pdf = tmp_path / "paper.pdf"
+    make_pdf(pdf)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        NvidiaProvider,
+        "complete",
+        lambda *args, **kwargs: (
+            '{"architecture":"mlp","loss":"cross_entropy","datasets":["cifar10"],'
+            '"metrics":["accuracy"],"training":[],"ambiguities":[]}'
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["run", str(pdf), "--no-validate"])
+
+    assert result.exit_code == 0, result.output
+    workspaces = list((tmp_path / "workspaces").glob("*"))
+    assert workspaces
+    assert (workspaces[0] / "analysis" / "implementation_plan.json").exists()
+    assert (workspaces[0] / "analysis" / "implementation_trace.json").exists()
