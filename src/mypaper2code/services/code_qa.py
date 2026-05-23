@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mypaper2code.core.io import read_json
-from mypaper2code.core.models import ImplementationTrace
+from mypaper2code.core.models import AgenticImplementationTrace, ImplementationTrace
 from mypaper2code.core.text import excerpt, tokenize
 
 CODE_EXTENSIONS = {".py", ".yaml", ".yml", ".md", ".txt"}
@@ -11,7 +11,9 @@ CODE_EXTENSIONS = {".py", ".yaml", ".yml", ".md", ".txt"}
 
 class CodeQuestionAnswerer:
     def answer(self, workspace: Path, question: str, limit: int = 5) -> list[str]:
-        generated = workspace / "generated_code"
+        generated = workspace / "generated"
+        if not generated.exists():
+            generated = workspace / "generated_code"
         if not generated.exists():
             raise FileNotFoundError(f"Generated code not found: {generated}")
 
@@ -24,6 +26,30 @@ class CodeQuestionAnswerer:
 
     @staticmethod
     def _trace_matches(workspace: Path, query_terms: set[str]) -> list[str]:
+        agentic_trace_path = workspace / "trace" / "implementation_trace.json"
+        if agentic_trace_path.exists():
+            trace = AgenticImplementationTrace.model_validate(read_json(agentic_trace_path))
+            matches: list[str] = []
+            for entry in trace.entries:
+                haystack = " ".join(
+                    [
+                        entry.step_id,
+                        entry.claim,
+                        " ".join(location.file for location in entry.implemented_in),
+                        " ".join(location.symbol or "" for location in entry.implemented_in),
+                    ]
+                )
+                if query_terms & set(tokenize(haystack)):
+                    locations = ", ".join(location.file for location in entry.implemented_in)
+                    evidence = ""
+                    if entry.evidence:
+                        evidence = (
+                            f" Evidence: {entry.evidence[0].kind} "
+                            f"{entry.evidence[0].evidence_id}."
+                        )
+                    matches.append(f"{entry.step_id}: {entry.claim} -> {locations}.{evidence}")
+            return matches
+
         trace_path = workspace / "analysis" / "implementation_trace.json"
         if not trace_path.exists():
             return []

@@ -25,7 +25,24 @@ class WorkspaceManager:
         workspace_id = f"{paper_id}_{timestamp}"
         root = self.base_dir / workspace_id
 
-        for child in ("paper", "analysis", "generated_code", "runs"):
+        for child in (
+            "paper",
+            "paper/pages",
+            "paper/tables",
+            "paper/figures",
+            "paper/equations",
+            "paper/algorithms",
+            "understanding",
+            "decisions",
+            "plan",
+            "generated",
+            "validation",
+            "trace",
+            # Compatibility directories for existing commands and older workspaces.
+            "analysis",
+            "generated_code",
+            "runs",
+        ):
             (root / child).mkdir(parents=True, exist_ok=True)
 
         copied_pdf = root / "paper" / "original.pdf"

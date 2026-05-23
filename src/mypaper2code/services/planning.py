@@ -4,12 +4,20 @@ from pathlib import Path
 
 from mypaper2code.core.io import load_model, write_json, write_yaml
 from mypaper2code.core.models import (
+    AgenticImplementationStep,
     ImplementationPlan,
     ImplementationRequirements,
     ImplementationStep,
     PaperUnderstanding,
+    ResearchImplementationPlan,
+    ResearchUnderstanding,
 )
-from mypaper2code.services.analysis import MethodAnalyzer, build_understanding, sources_for_plan
+from mypaper2code.services.analysis import (
+    MethodAnalyzer,
+    legacy_understanding,
+    load_research_understanding,
+)
+from mypaper2code.services.decisions import load_approvals, unresolved_blocking_ambiguities
 from mypaper2code.services.requirements import load_requirements, save_requirements
 
 
@@ -18,67 +26,169 @@ class ImplementationPlanner:
         self,
         workspace: Path,
         requirements: ImplementationRequirements | None = None,
-    ) -> ImplementationPlan:
+    ) -> ResearchImplementationPlan:
         requirements = requirements or load_requirements(workspace)
         save_requirements(workspace, requirements)
         understanding = self._load_or_analyze_understanding(workspace)
-        sources = sources_for_plan(workspace)
-        plan = ImplementationPlan(
+        blocking = unresolved_blocking_ambiguities(understanding, workspace)
+        approvals = load_approvals(workspace)
+        plan = ResearchImplementationPlan(
             requirements=requirements,
             understanding=understanding,
-            steps=self._steps_for(understanding, sources, requirements),
+            paper_type=understanding.paper_type,
+            steps=self._agentic_steps_for(understanding, requirements),
+            blocking_decisions=[item.ambiguity_id for item in blocking],
             assumptions=self._assumptions_for(understanding, requirements),
-            sources=sources,
+            provider=understanding.provider,
+            model=understanding.model,
+            approved=approvals.get("plan", False),
         )
         self.write(workspace, plan)
         return plan
 
     @staticmethod
-    def _load_or_analyze_understanding(workspace: Path) -> PaperUnderstanding:
-        path = workspace / "analysis" / "paper_understanding.json"
+    def _load_or_analyze_understanding(workspace: Path) -> ResearchUnderstanding:
+        path = workspace / "understanding" / "research_understanding.json"
+        legacy_path = workspace / "analysis" / "paper_understanding.json"
+        if not path.exists() and legacy_path.exists():
+            understanding = load_research_understanding(workspace)
+            from mypaper2code.services.analysis import write_research_understanding
+
+            write_research_understanding(workspace, understanding)
+            return understanding
         if not path.exists():
-            MethodAnalyzer().analyze(workspace)
+            MethodAnalyzer().understand(workspace)
         if path.exists():
-            return load_model(path, PaperUnderstanding)
-        return build_understanding(workspace)
+            return load_model(path, ResearchUnderstanding)
+        return load_research_understanding(workspace)
 
     @staticmethod
-    def write(workspace: Path, plan: ImplementationPlan) -> None:
+    def write(workspace: Path, plan: ResearchImplementationPlan) -> None:
+        plan_dir = workspace / "plan"
         analysis_dir = workspace / "analysis"
+        write_yaml(plan_dir / "requirements.yaml", plan.requirements.model_dump(mode="json"))
+        write_json(plan_dir / "research_plan.json", plan.model_dump(mode="json"))
         write_yaml(analysis_dir / "requirements.yaml", plan.requirements.model_dump(mode="json"))
-        write_json(analysis_dir / "implementation_plan.json", plan.model_dump(mode="json"))
+        legacy = _legacy_plan(plan)
+        write_json(analysis_dir / "implementation_plan.json", legacy.model_dump(mode="json"))
         lines = ["# Implementation Plan", "", "## Requirements", ""]
         for key, value in plan.requirements.model_dump().items():
             lines.append(f"- `{key}`: {value}")
         lines.extend(["", "## Paper Understanding", ""])
-        lines.append(f"- `architecture`: {plan.understanding.architecture}")
-        lines.append(f"- `loss`: {plan.understanding.loss}")
+        lines.append(f"- `paper_type`: {plan.paper_type}")
+        lines.append(
+            f"- `contributions`: {', '.join(plan.understanding.contributions) or 'unspecified'}"
+        )
+        lines.append(f"- `algorithms`: {', '.join(plan.understanding.algorithms) or 'unspecified'}")
         lines.append(f"- `datasets`: {', '.join(plan.understanding.datasets) or 'unspecified'}")
         lines.append(f"- `metrics`: {', '.join(plan.understanding.metrics) or 'unspecified'}")
+        if plan.blocking_decisions:
+            lines.extend(["", "## Blocking Decisions", ""])
+            lines.extend(f"- `{item}`" for item in plan.blocking_decisions)
         lines.extend(["", "## Implementation Steps", ""])
         for step in plan.steps:
             lines.append(f"### {step.step_id}. {step.title}")
             lines.append(f"- Purpose: {step.purpose}")
-            lines.append(f"- Files: {', '.join(f'`{file}`' for file in step.files)}")
-            if step.symbols:
-                lines.append(f"- Symbols: {', '.join(f'`{symbol}`' for symbol in step.symbols)}")
-            if step.assumptions:
-                lines.append(f"- Assumptions: {'; '.join(step.assumptions)}")
+            lines.append(f"- Files: {', '.join(f'`{file}`' for file in step.target_files)}")
+            if step.acceptance_criteria:
+                lines.append(f"- Acceptance: {'; '.join(step.acceptance_criteria)}")
+            if step.risks:
+                lines.append(f"- Risks: {'; '.join(step.risks)}")
             lines.append("")
         lines.extend(["", "## Assumptions", ""])
         lines.extend(f"- {item}" for item in plan.assumptions)
-        lines.extend(["", "## Sources", ""])
-        if plan.sources:
-            lines.extend(
-                f"- Page {source.page}, section `{source.section}`: {source.text}"
-                for source in plan.sources
-            )
-        else:
-            lines.append("- No source passage available.")
-        (analysis_dir / "implementation_plan.md").write_text(
+        (plan_dir / "implementation_plan.md").write_text(
             "\n".join(lines),
             encoding="utf-8",
         )
+        (analysis_dir / "implementation_plan.md").write_text("\n".join(lines), encoding="utf-8")
+
+    @staticmethod
+    def _agentic_steps_for(
+        understanding: ResearchUnderstanding,
+        requirements: ImplementationRequirements,
+    ) -> list[AgenticImplementationStep]:
+        evidence = understanding.evidence[:5]
+        steps = [
+            AgenticImplementationStep(
+                step_id="project_scaffold",
+                title="Create reproducible project scaffold",
+                purpose="Create configs, README, dependency notes, and a paper evidence manifest.",
+                target_files=["README.md", "configs/default.yaml", "evidence/manifest.json"],
+                acceptance_criteria=[
+                    "The generated project documents paper type and unresolved assumptions.",
+                    "The config includes datasets, metrics, protocols, and hyperparameters.",
+                ],
+                evidence=evidence,
+                risks=["Paper details may be incomplete if extraction missed tables or equations."],
+            ),
+            AgenticImplementationStep(
+                step_id="method_core",
+                title="Implement method core",
+                purpose="Implement the main algorithmic interface described by the paper.",
+                target_files=["src/method/core.py"],
+                acceptance_criteria=[
+                    "The module exposes a MethodCore class with deterministic toy execution.",
+                    "Evidence references are preserved in comments and trace metadata.",
+                ],
+                evidence=evidence,
+                risks=[
+                    "Complex math may require a human-confirmed derivation before full fidelity."
+                ],
+            ),
+            AgenticImplementationStep(
+                step_id="experiment_protocol",
+                title="Implement experiment protocol",
+                purpose=(
+                    "Wire datasets, metrics, hyperparameters, and protocol into runnable scripts."
+                ),
+                target_files=[
+                    "src/experiments/protocol.py",
+                    "scripts/run_experiment.py",
+                    "tests/test_contract.py",
+                ],
+                acceptance_criteria=[
+                    "Smoke execution runs without external datasets.",
+                    "Contract tests check method output shape and metric types.",
+                ],
+                evidence=evidence,
+                risks=["Real reproduction requires real datasets and compute resources."],
+            ),
+        ]
+        if understanding.paper_type == "ml":
+            steps.insert(
+                2,
+                AgenticImplementationStep(
+                    step_id="ml_components",
+                    title="Implement ML-specific components",
+                    purpose="Provide a PyTorch-ready adapter when the paper is machine learning.",
+                    target_files=["src/method/ml_adapter.py"],
+                    dependencies=["torch"],
+                    acceptance_criteria=[
+                        "Adapter is optional and the core method remains testable without "
+                        "training.",
+                    ],
+                    evidence=evidence,
+                    risks=["Architecture details may still need human review."],
+                ),
+            )
+        if requirements.include_tests:
+            steps.append(
+                AgenticImplementationStep(
+                    step_id="validation_assets",
+                    title="Add validation assets",
+                    purpose=(
+                        "Add smoke and contract tests generated from the plan acceptance criteria."
+                    ),
+                    target_files=["tests/test_smoke.py", "tests/test_contract.py"],
+                    acceptance_criteria=[
+                        "Tests cover imports, config loading, method execution, and trace "
+                        "presence.",
+                    ],
+                    evidence=evidence,
+                )
+            )
+        return steps
 
     @staticmethod
     def _steps_for(
@@ -166,16 +276,16 @@ class ImplementationPlanner:
 
     @staticmethod
     def _assumptions_for(
-        understanding: PaperUnderstanding,
+        understanding: ResearchUnderstanding,
         requirements: ImplementationRequirements,
     ) -> list[str]:
-        assumptions = list(understanding.ambiguities)
+        assumptions = [item.question for item in understanding.ambiguities]
         assumptions.append(
             f"Implementation follows user requirements: framework={requirements.framework}, "
             f"dataset={requirements.dataset}, style={requirements.style}."
         )
         assumptions.append(
-            "Each implementation step records a trace entry linking sources to files."
+            "Each implementation step must record trace entries linking evidence to files."
         )
         return assumptions
 
@@ -198,3 +308,28 @@ def _loss_symbol(loss: str) -> str:
         "mse": "MSELoss",
         "triplet": "TripletLoss",
     }.get(loss, "PaperLoss")
+
+
+def _legacy_plan(plan: ResearchImplementationPlan) -> ImplementationPlan:
+    understanding = legacy_understanding(plan.understanding)
+    return ImplementationPlan(
+        requirements=plan.requirements,
+        understanding=understanding,
+        steps=[
+            ImplementationStep(
+                step_id=step.step_id,
+                title=step.title,
+                files=step.target_files,
+                purpose=step.purpose,
+                source_refs=[
+                    source
+                    for source in understanding.sources
+                    if source.chunk_id in {evidence.evidence_id for evidence in step.evidence}
+                ],
+                assumptions=step.risks,
+            )
+            for step in plan.steps
+        ],
+        assumptions=plan.assumptions,
+        sources=understanding.sources,
+    )

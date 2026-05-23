@@ -18,6 +18,12 @@ from mypaper2code.providers.base import (
 from mypaper2code.services.analysis import MethodAnalyzer
 from mypaper2code.services.code_qa import CodeQuestionAnswerer
 from mypaper2code.services.config import load_config, set_config
+from mypaper2code.services.decisions import (
+    load_approvals,
+    load_decisions,
+    save_approval,
+    save_decision,
+)
 from mypaper2code.services.generation import CodeWriter
 from mypaper2code.services.ingestion import IngestionService
 from mypaper2code.services.planning import ImplementationPlanner
@@ -89,6 +95,11 @@ def run(
         "--validate/--no-validate",
         help="Validate generated code.",
     ),
+    validation_level: str = typer.Option(
+        "smoke",
+        "--level",
+        help="Validation level: smoke, contract, or repro.",
+    ),
     report_: bool = typer.Option(True, "--report/--no-report", help="Write fidelity report."),
 ) -> None:
     """Single entrypoint for the full paper-to-code workflow."""
@@ -108,7 +119,7 @@ def run(
             "Analyze": _yes_no(analyze_),
             "Plan": _yes_no(plan_),
             "Implement": _yes_no(implement_),
-            "Validate": _yes_no(validate_),
+            "Validate": f"{_yes_no(validate_)} ({validation_level})",
             "Report": _yes_no(report_),
         },
     )
@@ -162,20 +173,24 @@ def run(
         with console.status("Writing plan artifacts...", spinner="dots"):
             plan = ImplementationPlanner().create_plan(workspace, requirements)
         _print_success(f"Implementation plan ready with {len(plan.steps)} steps")
-        _print_path("Plan Markdown", workspace / "analysis" / "implementation_plan.md")
-        _print_path("Plan JSON", workspace / "analysis" / "implementation_plan.json")
+        _print_path("Plan Markdown", workspace / "plan" / "implementation_plan.md")
+        _print_path("Plan JSON", workspace / "plan" / "research_plan.json")
 
     if implement_:
         _print_step("Implement", "Generating the planned source tree and implementation trace.")
-        with console.status("Writing generated code...", spinner="dots"):
-            generated = CodeWriter().implement(workspace)
+        try:
+            with console.status("Writing generated code...", spinner="dots"):
+                generated = CodeWriter().implement(workspace)
+        except RuntimeError as exc:
+            _print_failure(str(exc))
+            raise typer.Exit(code=1) from exc
         _print_success("Generated implementation written")
         _print_path("Generated code", generated)
-        _print_path("Trace", workspace / "analysis" / "implementation_trace.json")
+        _print_path("Trace", workspace / "trace" / "implementation_trace.json")
 
     if validate_:
-        _print_step("Validate", "Running compile, Ruff when available, and pytest checks.")
-        _print_validation_results(workspace)
+        _print_step("Validate", "Running validation checks.")
+        _print_validation_results(workspace, level=validation_level)
 
     if report_:
         _print_step("Report", "Writing the fidelity and assumptions report.")
@@ -318,6 +333,106 @@ def analyze(
     _print_path("Understanding JSON", workspace / "analysis" / "paper_understanding.json")
 
 
+@app.command()
+def understand(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
+) -> None:
+    """Extract rich, evidence-backed research understanding."""
+    WorkspaceManager.ensure(workspace)
+    requirements = load_requirements(workspace)
+    _print_header("Understand paper")
+    _print_context(
+        "Understanding context",
+        {
+            "Workspace": str(workspace),
+            "Provider": requirements.provider,
+            "Model": requirements.model,
+        },
+    )
+    with console.status("Extracting rich structured understanding...", spinner="dots"):
+        understanding = MethodAnalyzer().understand(workspace)
+    _print_success("Research understanding written")
+    _print_context(
+        "Understanding summary",
+        {
+            "Paper type": understanding.paper_type,
+            "Contributions": len(understanding.contributions),
+            "Algorithms": len(understanding.algorithms),
+            "Equations": len(understanding.equations),
+            "Ambiguities": len(understanding.ambiguities),
+        },
+    )
+    _print_path("Understanding JSON", workspace / "understanding" / "research_understanding.json")
+    _print_path("Review", workspace / "understanding" / "review.md")
+
+
+@app.command()
+def review(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
+) -> None:
+    """List open ambiguities and recorded human decisions."""
+    from mypaper2code.core.io import read_json
+    from mypaper2code.core.models import ResearchUnderstanding
+
+    WorkspaceManager.ensure(workspace)
+    path = workspace / "understanding" / "research_understanding.json"
+    if not path.exists():
+        _print_failure("Run `understand` before review.")
+        raise typer.Exit(code=1)
+    understanding = ResearchUnderstanding.model_validate(read_json(path))
+    decisions = load_decisions(workspace)
+    approvals = load_approvals(workspace)
+    _print_header("Human review")
+    table = Table(title="Ambiguities")
+    table.add_column("ID")
+    table.add_column("Severity")
+    table.add_column("Status")
+    table.add_column("Question")
+    for item in understanding.ambiguities:
+        status = "answered" if item.ambiguity_id in decisions else "open"
+        if approvals.get(item.ambiguity_id):
+            status = "approved"
+        table.add_row(item.ambiguity_id, item.severity, status, item.question)
+    console.print(table)
+    if decisions:
+        _print_context("Recorded decisions", {key: value.value for key, value in decisions.items()})
+    else:
+        console.print("[dim]No human decisions recorded yet.[/dim]")
+
+
+@app.command()
+def decide(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
+    decision_id: Annotated[str, typer.Option("--id", help="Ambiguity or decision id.")],
+    value: Annotated[str, typer.Option("--value", help="Decision value.")],
+) -> None:
+    """Record a human decision for an ambiguity."""
+    WorkspaceManager.ensure(workspace)
+    decision = save_decision(workspace, decision_id, value)
+    _print_success(f"Decision `{decision.decision_id}` saved")
+
+
+@app.command("approve-plan")
+def approve_plan(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
+) -> None:
+    """Approve the current implementation plan."""
+    WorkspaceManager.ensure(workspace)
+    save_approval(workspace, "plan")
+    _print_success("Plan approved")
+
+
+@app.command("approve-assumption")
+def approve_assumption(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
+    assumption_id: Annotated[str, typer.Option("--id", help="Ambiguity or assumption id.")],
+) -> None:
+    """Approve one extracted assumption or ambiguity."""
+    WorkspaceManager.ensure(workspace)
+    save_approval(workspace, assumption_id)
+    _print_success(f"Assumption `{assumption_id}` approved")
+
+
 @app.command(name="plan")
 def plan_command(
     workspace: Annotated[Path, typer.Option("--workspace", "-w", exists=True, file_okay=False)],
@@ -344,8 +459,8 @@ def plan_command(
     with console.status("Creating implementation plan...", spinner="dots"):
         plan = ImplementationPlanner().create_plan(workspace, requirements)
     _print_success(f"Implementation plan ready with {len(plan.steps)} steps")
-    _print_path("Plan Markdown", workspace / "analysis" / "implementation_plan.md")
-    _print_path("Plan JSON", workspace / "analysis" / "implementation_plan.json")
+    _print_path("Plan Markdown", workspace / "plan" / "implementation_plan.md")
+    _print_path("Plan JSON", workspace / "plan" / "research_plan.json")
 
 
 @app.command()
@@ -356,11 +471,15 @@ def implement(
     WorkspaceManager.ensure(workspace)
     _print_header("Implement plan")
     _print_path("Workspace", workspace)
-    with console.status("Writing generated code and trace...", spinner="dots"):
-        generated = CodeWriter().implement(workspace)
+    try:
+        with console.status("Writing generated code and trace...", spinner="dots"):
+            generated = CodeWriter().implement(workspace)
+    except RuntimeError as exc:
+        _print_failure(str(exc))
+        raise typer.Exit(code=1) from exc
     _print_success("Generated implementation written")
     _print_path("Generated code", generated)
-    _print_path("Trace", workspace / "analysis" / "implementation_trace.json")
+    _print_path("Trace", workspace / "trace" / "implementation_trace.json")
 
 
 @app.command()
@@ -419,17 +538,19 @@ def main() -> None:
 @app.command()
 def validate(
     workspace: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    level: str = typer.Option("smoke", "--level", help="smoke, contract, or repro."),
 ) -> None:
     """Run minimal validation checks for generated code."""
     WorkspaceManager.ensure(workspace)
     _print_header("Validate generated code")
     _print_path("Workspace", workspace)
-    _print_validation_results(workspace)
+    _print_validation_results(workspace, level=level)
 
 
-def _print_validation_results(workspace: Path) -> None:
+def _print_validation_results(workspace: Path, level: str = "smoke") -> None:
     with console.status("Running validation commands...", spinner="dots"):
-        results = ExperimentRunner().validate(workspace)
+        suite = ExperimentRunner().validate_suite(workspace, level=level)
+    results = suite.results
     failed = False
     table = Table(title="Validation results")
     table.add_column("Status")
@@ -441,6 +562,14 @@ def _print_validation_results(workspace: Path) -> None:
         failed = failed or not result.passed
         table.add_row(status, result.name, result.command, result.log_path)
     console.print(table)
+    _print_context(
+        "Fidelity",
+        {
+            "Level": suite.level,
+            "Score": suite.fidelity_score,
+            "Reasons": " ".join(suite.reasons),
+        },
+    )
     if failed:
         _print_failure("Validation failed. Open the log paths above for details.")
         raise typer.Exit(code=1)

@@ -4,7 +4,15 @@ import re
 from pathlib import Path
 
 from mypaper2code.core.io import write_json
-from mypaper2code.core.models import PaperChunk, PaperSection
+from mypaper2code.core.models import (
+    PaperAlgorithmArtifact,
+    PaperChunk,
+    PaperEquationArtifact,
+    PaperFigureArtifact,
+    PaperPageArtifact,
+    PaperSection,
+    PaperTableArtifact,
+)
 from mypaper2code.core.text import normalize_space
 from mypaper2code.services.search.hybrid import HybridRetriever
 from mypaper2code.services.workspace import WorkspaceManager
@@ -35,6 +43,73 @@ def extract_pdf_pages(pdf_path: Path) -> list[tuple[int, str]]:
         return [(page.number + 1, page.get_text("text")) for page in doc]
     finally:
         doc.close()
+
+
+def build_page_artifacts(pages: list[tuple[int, str]]) -> list[PaperPageArtifact]:
+    return [
+        PaperPageArtifact(
+            evidence_id=f"page-{page:04d}",
+            page=page,
+            text=normalize_space(text),
+        )
+        for page, text in pages
+        if normalize_space(text)
+    ]
+
+
+def extract_multimodal_artifacts(
+    pages: list[tuple[int, str]],
+) -> tuple[
+    list[PaperTableArtifact],
+    list[PaperFigureArtifact],
+    list[PaperEquationArtifact],
+    list[PaperAlgorithmArtifact],
+]:
+    tables: list[PaperTableArtifact] = []
+    figures: list[PaperFigureArtifact] = []
+    equations: list[PaperEquationArtifact] = []
+    algorithms: list[PaperAlgorithmArtifact] = []
+    for page, text in pages:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for idx, line in enumerate(lines):
+            lower = line.lower()
+            if lower.startswith(("table ", "tab.")):
+                tables.append(
+                    PaperTableArtifact(
+                        evidence_id=f"table-{page:04d}-{len(tables):03d}",
+                        page=page,
+                        label=line.split(":", 1)[0],
+                        text=_local_block(lines, idx),
+                    )
+                )
+            if lower.startswith(("figure ", "fig.", "fig ")):
+                figures.append(
+                    PaperFigureArtifact(
+                        evidence_id=f"figure-{page:04d}-{len(figures):03d}",
+                        page=page,
+                        label=line.split(":", 1)[0],
+                        caption=_local_block(lines, idx),
+                    )
+                )
+            if _looks_like_equation(line):
+                equations.append(
+                    PaperEquationArtifact(
+                        evidence_id=f"equation-{page:04d}-{len(equations):03d}",
+                        page=page,
+                        label=f"equation page {page}",
+                        text=line,
+                    )
+                )
+            if lower.startswith(("algorithm ", "procedure ", "input:")):
+                algorithms.append(
+                    PaperAlgorithmArtifact(
+                        evidence_id=f"algorithm-{page:04d}-{len(algorithms):03d}",
+                        page=page,
+                        label=line.split(":", 1)[0],
+                        text=_local_block(lines, idx, window=8),
+                    )
+                )
+    return tables, figures, equations, algorithms
 
 
 def detect_sections(pages: list[tuple[int, str]], paper_id: str) -> list[PaperSection]:
@@ -141,12 +216,40 @@ class IngestionService:
         metadata = self.workspace_manager.load_metadata(workspace)
         sections = detect_sections(pages, metadata.paper.paper_id)
         chunks = chunk_sections(sections, metadata.paper.paper_id)
+        page_artifacts = build_page_artifacts(pages)
+        tables, figures, equations, algorithms = extract_multimodal_artifacts(pages)
 
+        write_json(workspace / "paper" / "pages.json", [p.model_dump() for p in page_artifacts])
         write_json(
             workspace / "paper" / "extracted_sections.json",
             [s.model_dump() for s in sections],
         )
         write_json(workspace / "paper" / "chunks.json", [c.model_dump() for c in chunks])
+        write_json(workspace / "paper" / "tables" / "tables.json", [t.model_dump() for t in tables])
+        write_json(
+            workspace / "paper" / "figures" / "figures.json",
+            [f.model_dump() for f in figures],
+        )
+        write_json(
+            workspace / "paper" / "equations" / "equations.json",
+            [e.model_dump() for e in equations],
+        )
+        write_json(
+            workspace / "paper" / "algorithms" / "algorithms.json",
+            [a.model_dump() for a in algorithms],
+        )
+        write_json(
+            workspace / "paper" / "corpus_manifest.json",
+            {
+                "schema_version": "2.0",
+                "pages": len(page_artifacts),
+                "chunks": len(chunks),
+                "tables": len(tables),
+                "figures": len(figures),
+                "equations": len(equations),
+                "algorithms": len(algorithms),
+            },
+        )
         HybridRetriever.build(workspace, chunks)
         return workspace
 
@@ -159,3 +262,14 @@ def _guess_title(pdf_path: Path, pages: list[tuple[int, str]]) -> str:
         if 8 <= len(cleaned) <= 160 and not cleaned.lower().startswith(("abstract", "arxiv")):
             return cleaned
     return pdf_path.stem
+
+
+def _local_block(lines: list[str], idx: int, window: int = 4) -> str:
+    return normalize_space(" ".join(lines[idx : idx + window]))
+
+
+def _looks_like_equation(line: str) -> bool:
+    if len(line) > 160:
+        return False
+    operators = sum(line.count(token) for token in ("=", "+", "-", "/", "\\", "sum", "int"))
+    return operators >= 2 and any(char.isalpha() for char in line)
